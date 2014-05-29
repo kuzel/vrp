@@ -86,6 +86,7 @@ ssize_t burst_read(
 void timer_cb(
     unsigned long arg) {
 //  printk(KERN_WARNING "timer\n");
+  /* -- TODO protect by spinlock or atomic increment? */
   event = event + 1;
   wake_up_interruptible(&burst_device.inq);
   mod_timer(&burst_device.timer, jiffies + HZ/divider);
