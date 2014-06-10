@@ -3,6 +3,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/poll.h>
 #include <linux/stat.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -23,6 +24,7 @@ module_param(burst_minor, int, S_IRUGO);
 module_param(divider, int, S_IRUGO);
 
 static struct burst_dev {
+  int last_event;
   wait_queue_head_t inq;
   struct timer_list timer;
   struct semaphore sem;
@@ -62,25 +64,58 @@ ssize_t burst_read(
   if(down_interruptible(&dev->sem))
     return -ERESTARTSYS;
   local_event = event;
-  up(&dev->sem);
 
-//  if(filp->f_flags & O_NONBLOCK)
-//    return -EAGAIN;
+  if(local_event == dev->last_event) {
+    up(&dev->sem);
+	if(filp->f_flags & O_NONBLOCK) {
+	  printk(KERN_WARNING "NONBLOCK no data\n");
+      return -EAGAIN;
+    }
 //  printk(KERN_WARNING "\"%s\" reading: going to sleep\n", current->comm);
-  if(wait_event_interruptible(dev->inq, (event != local_event)))
-    return -ERESTARTSYS;
-  if(down_interruptible(&dev->sem))
-    return -ERESTARTSYS;
+	printk(KERN_WARNING "BLOCK no data\n");
+    if(wait_event_interruptible(dev->inq, (event != local_event)))
+      return -ERESTARTSYS;
+    if(down_interruptible(&dev->sem))
+      return -ERESTARTSYS;
+  }
+
+  if(filp->f_flags & O_NONBLOCK) {
+	printk(KERN_WARNING "NONBLOCK data available\n");
+  }
+  else {
+	printk(KERN_WARNING "BLOCK data available\n");
+  }
 
   len = sprintf(message, "HZ:%d, %d\n", HZ, event);
   if(copy_to_user(buf, message, len)) {
     retval = -EFAULT;
     goto out;
   }
+  dev->last_event = event;
   retval = len;
 
   out: up(&dev->sem);
   return retval;
+}
+
+static unsigned int burst_poll(
+    struct file *filp,
+    poll_table *wait) {
+  struct burst_dev *dev = filp->private_data;
+  unsigned int mask = 0;
+
+  down(&dev->sem);
+  printk(KERN_WARNING "poll in\n");
+  poll_wait(filp, &dev->inq, wait);
+  if(event != dev->last_event) {
+	mask |= POLLIN | POLLRDNORM; /* readable */
+	printk(KERN_WARNING "poll out readable\n");
+  }
+  else {
+	printk(KERN_WARNING "poll out not readable\n");
+  }
+  up(&dev->sem);
+  return mask;
 }
 
 void timer_cb(
@@ -92,13 +127,15 @@ void timer_cb(
   mod_timer(&burst_device.timer, jiffies + HZ/divider);
 }
 
-struct file_operations burst_fops = { .owner = THIS_MODULE,
-//	.llseek =   burst_llseek,
-    .read = burst_read,
-//	.write =    burst_write,
-//	.unlocked_ioctl = burst_ioctl,
-    .open = burst_open,
-    .release = burst_release, };
+struct file_operations burst_fops = {
+  .owner = THIS_MODULE,
+//  .llseek = burst_llseek,
+  .read = burst_read,
+//  .write = burst_write,
+  .poll = burst_poll,
+//  .unlocked_ioctl = burst_ioctl,
+  .open = burst_open,
+  .release = burst_release, };
 
 static int vrp6_init(
     void) {
@@ -125,6 +162,7 @@ static int vrp6_init(
   printk(
   KERN_ALERT "vrp6 init, major %d, minor %d\n", burst_major, burst_minor);
 
+  burst_device.last_event = 0;
   init_waitqueue_head(&burst_device.inq);
   init_timer(&burst_device.timer);
   burst_device.timer.data = 0;
